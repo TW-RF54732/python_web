@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>成語射擊 | 手勢闖關</title>
+<link rel="stylesheet" href="/static/style.css">
+
+<!-- MediaPipe 手勢偵測（前端 WASM，不依賴後端） -->
+<script type="module">
+import {
+  HandLandmarker,
+  FilesetResolver
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js";
+
+let handLandmarker = null;
+let lastVideoTime  = -1;
+
+async function initMP() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU",
+    },
+    runningMode: "VIDEO",
+    numHands: 1,
+  });
+  const st = document.getElementById("cam-status");
+  if (st) { st.textContent = "✅ 偵測器就緒"; st.style.color = "var(--neon-g)"; }
+  window._mpReady = true;
+}
+
+async function startCamera() {
+  const video = document.getElementById("camera-video");
+  const st    = document.getElementById("cam-status");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: "user" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await new Promise(res => { video.onloadedmetadata = res; });
+    video.play();
+    if (st) { st.textContent = "📷 攝影機就緒"; st.style.color = "var(--neon-g)"; }
+  } catch (err) {
+    console.error(err);
+    if (st) { st.textContent = "⚠ 攝影機被拒絕：" + err.message; st.style.color = "var(--neon-r)"; }
+  }
+}
+
+// 手勢平滑與補償
+const SMOOTH       = 0.65;
+const LOST_TIMEOUT = 800;
+let smoothX = 0, smoothY = 0, lastValidX = 0, lastValidY = 0;
+let lastSeenTime = 0;
+
+function detectHands(video) {
+  if (!handLandmarker || !video || !video.videoWidth) return;
+  if (video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+
+  const now = performance.now();
+  const res = handLandmarker.detectForVideo(video, now);
+
+  if (res.landmarks && res.landmarks.length > 0) {
+    const lm = res.landmarks[0];
+    lastSeenTime = now;
+
+    // 拇指朝上：尖端(4).y < 關節(3).y 且 < 食指根(5).y
+    const tipY   = lm[4].y;
+    const jointY = lm[3].y;
+    const margin = 0.02;  // 避免抖動誤觸，需明顯高出才算
+    if (lm[4].y < lm[3].y && lm[4].y < lm[5].y) {
+      // 鏡像翻轉 x（video CSS 已 scaleX(-1)）
+      const rx = 1 - lm[4].x;
+      const tx = Math.max(0.02, Math.min(0.98, rx))      * window.innerWidth;
+      const ty = Math.max(0.04, Math.min(0.90, lm[4].y)) * window.innerHeight;
+      smoothX = SMOOTH * smoothX + (1 - SMOOTH) * tx;
+      smoothY = SMOOTH * smoothY + (1 - SMOOTH) * ty;
+      lastValidX = smoothX;
+      lastValidY = smoothY;
+      window._gesture = { thumbActive: true, x: smoothX, y: smoothY };
+    } else {
+      window._gesture = { thumbActive: false, x: smoothX, y: smoothY };
+    }
+  } else {
+    if (now - lastSeenTime < LOST_TIMEOUT) {
+      smoothX = lastValidX; smoothY = lastValidY;
+      window._gesture = { thumbActive: true, x: smoothX, y: smoothY };
+    } else {
+      window._gesture = { thumbActive: false, x: smoothX, y: smoothY };
+    }
+  }
+}
+
+window._detectHands = detectHands;
+window._gesture = { thumbActive: false, x: 0, y: 0 };
+
+await initMP();
+await startCamera();
+</script>
+</head>
+<body>
+
+<!-- 攝影機背景（前端 video，CSS 鏡像） -->
+<div id="camera-wrap">
+  <video id="camera-video" autoplay playsinline muted
+         style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1);
+                opacity:0.18;filter:saturate(0) brightness(0.7)"></video>
+</div>
+
+<!-- 狀態提示 -->
+<div id="cam-status"
+     style="position:fixed;top:8px;right:16px;z-index:200;
+            font-family:var(--font-mono);font-size:.72rem;
+            color:var(--muted);letter-spacing:.1em">
+  載入中...
+</div>
+
+<!-- 音量控制面板 -->
+<div id="vol-panel"
+     style="position:fixed;bottom:24px;right:20px;z-index:200;
+            background:rgba(8,16,28,0.90);border:1px solid rgba(0,229,160,0.2);
+            border-radius:6px;padding:12px 16px;backdrop-filter:blur(8px);
+            display:flex;flex-direction:column;gap:8px;min-width:180px">
+
+  <!-- 靜音切換 -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px">
+    <span style="font-family:var(--font-mono);font-size:.72rem;color:var(--muted);letter-spacing:.1em">
+      🔊 音量
+    </span>
+    <button id="vol-mute"
+            style="font-family:var(--font-mono);font-size:.68rem;padding:2px 8px;
+                   border-radius:3px;border:1px solid rgba(0,229,160,0.25);
+                   background:transparent;color:var(--muted);cursor:pointer;
+                   transition:all .2s">
+      靜音
+    </button>
+  </div>
+
+  <!-- 主音量 -->
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="font-family:var(--font-mono);font-size:.65rem;color:var(--muted);width:28px">主</span>
+    <input type="range" id="vol-master" min="0" max="1" step="0.01" value="0.8"
+           style="flex:1;accent-color:var(--neon-g);cursor:pointer">
+    <span id="vol-master-val"
+          style="font-family:var(--font-mono);font-size:.65rem;color:var(--neon-g);width:28px;text-align:right">
+      80%
+    </span>
+  </div>
+
+  <!-- BGM 音量 -->
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="font-family:var(--font-mono);font-size:.65rem;color:var(--muted);width:28px">BGM</span>
+    <input type="range" id="vol-bgm" min="0" max="1" step="0.01" value="0.5"
+           style="flex:1;accent-color:var(--neon-b);cursor:pointer">
+    <span id="vol-bgm-val"
+          style="font-family:var(--font-mono);font-size:.65rem;color:var(--neon-b);width:28px;text-align:right">
+      50%
+    </span>
+  </div>
+
+  <!-- 音效音量 -->
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="font-family:var(--font-mono);font-size:.65rem;color:var(--muted);width:28px">SFX</span>
+    <input type="range" id="vol-sfx" min="0" max="1" step="0.01" value="1.0"
+           style="flex:1;accent-color:var(--neon-y);cursor:pointer">
+    <span id="vol-sfx-val"
+          style="font-family:var(--font-mono);font-size:.65rem;color:var(--neon-y);width:28px;text-align:right">
+      100%
+    </span>
+  </div>
+</div>
+
+<!-- 特效層 -->
+<div id="effects-layer"></div>
+
+<!-- HUD -->
+<div id="hud" style="display:none">
+  <span class="hud-item">題目 <span class="hud-val" id="hud-q">1/10</span></span>
+  <span class="hud-item" style="margin-left:12px">分數 <span class="hud-val" id="hud-score">0</span></span>
+</div>
+
+<div id="timer-bar-wrap" style="display:none">
+  <div id="timer-bar" style="width:100%"></div>
+</div>
+
+<div id="hint-text" style="display:none"></div>
+
+<!-- 游標 -->
+<div id="cursor" class="hidden">
+  <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+    <circle cx="28" cy="28" r="22" stroke="rgba(0,229,160,0.18)" stroke-width="3" fill="none"/>
+    <circle id="cursor-ring" cx="28" cy="28" r="22"
+            stroke="#00e5a0" stroke-width="3" fill="none"
+            stroke-dasharray="138.23" stroke-dashoffset="138.23"
+            stroke-linecap="round"
+            style="transform:rotate(-90deg);transform-origin:28px 28px;
+                   filter:drop-shadow(0 0 6px #00e5a0)"/>
+    <circle cx="28" cy="28" r="5" fill="#00e5a0"
+            style="filter:drop-shadow(0 0 6px #00e5a0)"/>
+    <line x1="4"  y1="28" x2="18" y2="28" stroke="#00e5a0" stroke-width="1.5" opacity=".6"/>
+    <line x1="38" y1="28" x2="52" y2="28" stroke="#00e5a0" stroke-width="1.5" opacity=".6"/>
+    <line x1="28" y1="4"  x2="28" y2="18" stroke="#00e5a0" stroke-width="1.5" opacity=".6"/>
+    <line x1="28" y1="38" x2="28" y2="52" stroke="#00e5a0" stroke-width="1.5" opacity=".6"/>
+  </svg>
+</div>
+
+<!-- ══════ 開始畫面 ══════ -->
+<div id="screen-start">
+  <div class="panel">
+    <div class="game-title">成語闖關</div>
+    <div class="game-subtitle">IDIOM SHOOTER · GESTURE CONTROL</div>
+    <div class="start-hint">豎起大拇指 · 停留 1.5 秒 · 開始遊戲</div>
+
+    <div class="meta-row" style="margin-top:20px">
+      <span class="meta-tag">10 題</span>
+      <span class="meta-tag">15s / 題</span>
+      <span class="meta-tag">混合題型</span>
+    </div>
+
+    <div style="margin-top:22px;display:flex;flex-direction:column;align-items:center;gap:8px">
+      <svg width="64" height="64" viewBox="0 0 64 64" style="opacity:.85">
+        <circle cx="32" cy="32" r="26" stroke="rgba(0,229,160,.15)" stroke-width="4" fill="none"/>
+        <circle id="start-ring" cx="32" cy="32" r="26"
+                stroke="#00e5a0" stroke-width="4" fill="none"
+                stroke-dasharray="163.36" stroke-dashoffset="163.36"
+                stroke-linecap="round"
+                style="transform:rotate(-90deg);transform-origin:32px 32px;
+                       filter:drop-shadow(0 0 8px #00e5a0);
+                       transition:stroke-dashoffset .05s linear"/>
+      </svg>
+      <div id="start-status"
+           style="font-family:var(--font-mono);font-size:.72rem;color:var(--muted);letter-spacing:.2em">
+        等待手勢...
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ 遊戲題目層 ══════ -->
+<div id="game-layer" style="visibility:hidden;pointer-events:none">
+  <div id="char-row"></div>
+  <div id="idiom-template"></div>
+  <div id="corners"></div>
+</div>
+
+<!-- ══════ 單題結果 ══════ -->
+<div id="screen-result" style="display:none">
+  <div class="result-card" id="result-card">
+    <div class="result-status" id="result-status"></div>
+    <div class="result-detail" id="result-detail"></div>
+    <div class="result-idiom"  id="result-idiom"></div>
+    <div class="result-next">▶ 比大拇指 1.5 秒繼續</div>
+    <div style="margin-top:14px;display:flex;justify-content:center">
+      <svg width="48" height="48" viewBox="0 0 48 48">
+        <circle cx="24" cy="24" r="18" stroke="rgba(255,255,255,.1)" stroke-width="3" fill="none"/>
+        <circle id="result-ring" cx="24" cy="24" r="18"
+                stroke="#00e5a0" stroke-width="3" fill="none"
+                stroke-dasharray="113.1" stroke-dashoffset="113.1"
+                stroke-linecap="round"
+                style="transform:rotate(-90deg);transform-origin:24px 24px;
+                       filter:drop-shadow(0 0 6px #00e5a0);
+                       transition:stroke-dashoffset .05s linear"/>
+      </svg>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ 最終結果 ══════ -->
+<div id="screen-final" style="display:none">
+  <div class="final-card">
+    <div class="final-title">遊戲結束！</div>
+    <div class="final-score" id="final-score">0 / 100</div>
+    <div class="final-rank"  id="final-rank">繼續加油</div>
+    <button class="btn-restart" onclick="Game.reset()">再玩一次</button>
+  </div>
+</div>
+
+<script src="/static/audio.js"></script>
+<script src="/static/effects.js"></script>
+<script>
+const HOVER_TIME   = 1.5;
+const TOTAL_Q      = 10;
+const Q_TIME_LIMIT = 15.0;
+
+const $    = id => document.getElementById(id);
+const show = el => { if (el) el.style.display = ''; };
+const hide = el => { if (el) el.style.display = 'none'; };
+
+// game-layer 用 visibility 控制（內部有 fixed 子元素）
+const showGame = () => {
+  const el = $('game-layer');
+  el.style.visibility = 'visible';
+  el.style.pointerEvents = 'auto';
+};
+const hideGame = () => {
+  const el = $('game-layer');
+  el.style.visibility = 'hidden';
+  el.style.pointerEvents = 'none';
+};
+
+// ── 游標 ──────────────────────────────────────────────
+const Cursor = (() => {
+  const el = $('cursor'), ring = $('cursor-ring'), CIRC = 138.23;
+  function update(x, y, active, prog = 0) {
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+    if (active) {
+      el.classList.remove('hidden');
+      ring.style.strokeDashoffset = CIRC * (1 - prog);
+    } else {
+      el.classList.add('hidden');
+      ring.style.strokeDashoffset = CIRC;
+    }
+  }
+  return { update };
+})();
+
+// ── 秒準判定 ──────────────────────────────────────────
+const Aim = (() => {
+  let cur = null, t0 = null, prog = 0;
+  function update(id, active) {
+    if (!active || id === null) { cur = null; t0 = null; prog = 0; return { fired: false }; }
+    if (id !== cur) { cur = id; t0 = performance.now(); prog = 0; }
+    prog = Math.min((performance.now() - t0) / 1000 / HOVER_TIME, 1);
+    if (prog >= 1) { const c = cur; cur = null; t0 = null; prog = 0; return { fired: true, target: c }; }
+    return { fired: false };
+  }
+  function reset()  { cur = null; t0 = null; prog = 0; }
+  function getP(id) { return id === cur ? prog : 0; }
+  return { update, reset, getP };
+})();
+
+// ── 遊戲主控 ──────────────────────────────────────────
+const Game = (() => {
+  let state = 'start', currentQ = null, qStart = 0, timedOut = false;
+  let startHover = null, resultHover = null, fh = null;
+
+  const g = () => window._gesture || { thumbActive: false, x: 0, y: 0 };
+
+  function frame(now) {
+    if (window._detectHands) window._detectHands($('camera-video'));
+    const gs = g();
+    if      (state === 'start')  doStart(gs);
+    else if (state === 'play')   doPlay(gs);
+    else if (state === 'result') doResult(gs);
+    fh = requestAnimationFrame(frame);
+  }
+
+  function doStart(gs) {
+    const ring = $('start-ring'), st = $('start-status'), CIRC = 163.36;
+    if (gs.thumbActive) {
+      if (!startHover) startHover = performance.now();
+      const p = Math.min((performance.now() - startHover) / 1000 / HOVER_TIME, 1);
+      ring.style.strokeDashoffset = CIRC * (1 - p);
+      st.textContent = `準備中… ${Math.round(p * 100)}%`;
+      Cursor.update(gs.x, gs.y, true, p);
+      if (p >= 1) { startHover = null; startGame(); }
+    } else {
+      startHover = null;
+      ring.style.strokeDashoffset = CIRC;
+      st.textContent = '等待手勢...';
+      Cursor.update(gs.x, gs.y, false, 0);
+    }
+  }
+
+  function doPlay(gs) {
+    if (!currentQ) return;
+    const remain = Math.max(0, Q_TIME_LIMIT - (performance.now() - qStart) / 1000);
+    $('timer-bar').style.width = (remain / Q_TIME_LIMIT * 100) + '%';
+    $('timer-bar').classList.toggle('urgent', remain <= 5);
+
+    // 倒數最後 5 秒播 tick
+    if (remain <= 5 && remain > 0) Audio.onTick();
+
+    if (remain <= 0 && !timedOut) { timedOut = true; doTimeout(); return; }
+
+    Cursor.update(gs.x, gs.y, gs.thumbActive, 0);
+    const boxes = getBoxes();
+    const hit   = hitTest(boxes, gs.x, gs.y);
+    const aim   = Aim.update(hit, gs.thumbActive);
+
+    boxes.forEach((b, i) => {
+      const hov = (i === hit && gs.thumbActive);
+      b.el.classList.toggle('hovered', hov);
+      const r = b.el.querySelector('.box-ring');
+      if (r) r.style.strokeDashoffset = +r.getAttribute('data-circ') * (1 - (hov ? Aim.getP(i) : 0));
+    });
+
+    if (aim.fired) {
+      const chosen = boxes[aim.target]?.label;
+      if (chosen != null) doAnswer(chosen, aim.target);
+    }
+  }
+
+  function doResult(gs) {
+    const ring = $('result-ring'), CIRC = 113.1;
+    Cursor.update(gs.x, gs.y, gs.thumbActive, 0);
+    if (gs.thumbActive) {
+      if (!resultHover) resultHover = performance.now();
+      const p = Math.min((performance.now() - resultHover) / 1000 / HOVER_TIME, 1);
+      ring.style.strokeDashoffset = CIRC * (1 - p);
+      if (p >= 1) { resultHover = null; doNext(); }
+    } else {
+      resultHover = null;
+      ring.style.strokeDashoffset = CIRC;
+    }
+  }
+
+  // ── 碰撞偵測 ────────────────────────────────────────
+  function getBoxes() {
+    return Array.from(document.querySelectorAll(
+      currentQ?.type === 'wrong' ? '.char-box' : '.corner-box'
+    )).map(el => {
+      const r = el.getBoundingClientRect();
+      return { el, label: el.dataset.char, x1: r.left, y1: r.top, x2: r.right, y2: r.bottom };
+    });
+  }
+
+  function hitTest(boxes, cx, cy) {
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i];
+      if (cx > b.x1 && cx < b.x2 && cy > b.y1 && cy < b.y2) return i;
+    }
+    return null;
+  }
+
+  // ── 題目渲染 ────────────────────────────────────────
+  function renderQ(q) {
+    $('char-row').innerHTML = $('idiom-template').innerHTML = $('corners').innerHTML = '';
+    if (q.type === 'wrong') {
+      $('idiom-template').style.display = $('corners').style.display = 'none';
+      $('char-row').style.display = 'flex';
+      [...q.display].forEach(ch => {
+        const d = document.createElement('div');
+        d.className = 'char-box'; d.dataset.char = ch;
+        d.innerHTML = `<span style="position:relative;z-index:1">${ch}</span>
+          <svg style="position:absolute;inset:-14px;pointer-events:none;overflow:visible"
+               viewBox="0 0 138 138" fill="none">
+            <circle cx="69" cy="69" r="60" stroke="rgba(0,229,160,.12)" stroke-width="5" fill="none"/>
+            <circle class="box-ring" cx="69" cy="69" r="60" stroke="#00e5a0" stroke-width="5" fill="none"
+                    data-circ="376.99" stroke-dasharray="376.99" stroke-dashoffset="376.99"
+                    stroke-linecap="round"
+                    style="transform:rotate(-90deg);transform-origin:69px 69px;
+                           filter:drop-shadow(0 0 6px #00e5a0);transition:stroke-dashoffset .05s linear"/>
+          </svg>`;
+        $('char-row').appendChild(d);
+      });
+    } else {
+      $('char-row').style.display = 'none';
+      $('idiom-template').style.display = $('corners').style.display = '';
+      $('idiom-template').innerHTML = [...q.template].map(ch =>
+        ch === '＿' ? '<span class="blank">＿</span>' : ch
+      ).join('');
+      q.options.slice(0, 4).forEach((opt, i) => {
+        const d = document.createElement('div');
+        d.className = 'corner-box'; d.dataset.char = opt; d.dataset.corner = i;
+        d.innerHTML = `<span style="position:relative;z-index:1">${opt}</span>
+          <svg style="position:absolute;inset:-10px;pointer-events:none;overflow:visible"
+               viewBox="0 0 170 120" fill="none">
+            <rect x="5" y="5" width="160" height="110" rx="6"
+                  stroke="rgba(0,229,160,.12)" stroke-width="4" fill="none"/>
+            <rect class="box-ring" x="5" y="5" width="160" height="110" rx="6"
+                  stroke="#00e5a0" stroke-width="4" fill="none"
+                  data-circ="540" stroke-dasharray="540" stroke-dashoffset="540"
+                  stroke-linecap="round"
+                  style="filter:drop-shadow(0 0 6px #00e5a0);transition:stroke-dashoffset .05s linear"/>
+          </svg>`;
+        $('corners').appendChild(d);
+      });
+    }
+  }
+
+  // ── API ────────────────────────────────────────────
+  async function startGame() {
+    const d = await (await fetch('/start_game', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    })).json();
+    if (!d.ok) return;
+    state = 'play';
+    Audio.onStart();   // ← 開始音效 + BGM
+    hide($('screen-start'));
+    show($('hud')); show($('timer-bar-wrap')); show($('hint-text')); showGame();
+    Aim.reset(); timedOut = false;
+    await loadQ();
+  }
+
+  async function loadQ() {
+    const d = await (await fetch('/question')).json();
+    if (d.done) { showFinal(); return; }
+    currentQ = d; qStart = performance.now(); timedOut = false; Aim.reset();
+    $('hud-q').textContent     = `${d.index + 1}/${d.total}`;
+    $('hud-score').textContent = d.score;
+    $('hint-text').textContent = d.hint;
+    renderQ(d);
+  }
+
+  async function doAnswer(chosen, idx) {
+    const boxes = getBoxes(), b = boxes[idx];
+    const fx = b ? (b.x1 + b.x2) / 2 : innerWidth / 2;
+    const fy = b ? (b.y1 + b.y2) / 2 : innerHeight / 2;
+    const d = await (await fetch('/answer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chosen })
+    })).json();
+    if (d.result === 'correct') {
+      Effects.onCorrect(fx, fy);
+      Audio.onCorrect();   // ← 答對音效
+    } else {
+      Effects.onWrong(fx, fy);
+      Audio.onWrong();     // ← 答錯音效
+    }
+    showResult(d);
+  }
+
+  async function doTimeout() {
+    const d = await (await fetch('/timeout', { method: 'POST' })).json();
+    Effects.onTimeout(innerWidth / 2, innerHeight / 2);
+    Audio.onTimeout();     // ← 超時音效
+    showResult(d);
+  }
+
+  function showResult(d) {
+    state = 'result'; hideGame(); Aim.reset();
+    $('result-card').className = 'result-card ' + d.result;
+    const m = {
+      correct: ['○ 答對了！', `錯字正是「${d.correct_str}」`, 'correct'],
+      wrong:   ['✕ 答錯了',   `正確答案是「${d.correct_str}」`, 'wrong'],
+      timeout: ['⏱ 時間到',   `正確答案是「${d.correct_str}」`, 'timeout'],
+    }[d.result] || ['⏱ 時間到', '', 'timeout'];
+    $('result-status').textContent = m[0];
+    $('result-status').className   = 'result-status ' + m[2];
+    $('result-detail').textContent = m[1];
+    $('result-idiom').textContent  = `成語：${d.idiom}　分數：${d.score}`;
+    $('result-ring').style.strokeDashoffset = '113.1';
+    resultHover = null;
+    show($('screen-result'));
+  }
+
+  async function doNext() {
+    hide($('screen-result')); showGame();
+    const d = await (await fetch('/next', { method: 'POST' })).json();
+    if (d.state === 'final') { showFinal(d); return; }
+    state = 'play'; timedOut = false; Aim.reset();
+    await loadQ();
+  }
+
+  function showFinal(d) {
+    state = 'final';
+    hideGame(); hide($('hud')); hide($('timer-bar-wrap'));
+    hide($('hint-text')); hide($('screen-result')); show($('screen-final'));
+    Audio.onFinish();    // ← 結束音效 + BGM 淡出
+    fetch('/question').then(r => r.json()).then(q => {
+      const s = q.score ?? d?.score ?? 0;
+      $('final-score').textContent = `${s} / ${TOTAL_Q * 10}`;
+      $('final-rank').textContent =
+        s >= TOTAL_Q * 9 ? '🏆 成語達人' :
+        s >= TOTAL_Q * 7 ? '⭐ 表現良好' :
+        s >= TOTAL_Q * 5 ? '💪 繼續加油' : '📚 多多練習';
+    });
+  }
+
+  async function reset() {
+    cancelAnimationFrame(fh);
+    await fetch('/reset', { method: 'POST' });
+    state = 'start'; currentQ = null; timedOut = false;
+    startHover = null; resultHover = null; Aim.reset();
+    hide($('screen-final')); hide($('screen-result'));
+    hideGame(); hide($('hud'));
+    hide($('timer-bar-wrap')); hide($('hint-text'));
+    show($('screen-start'));
+    $('start-ring').style.strokeDashoffset = '163.36';
+    $('start-status').textContent = '等待手勢...';
+    init();
+  }
+
+  function init() { fh = requestAnimationFrame(frame); }
+  return { reset, init };
+})();
+
+window.addEventListener('load', () => {
+  // 音訊初始化
+  Audio.init();
+
+  // 音量滑桿
+  const masterSlider = document.getElementById('vol-master');
+  const bgmSlider    = document.getElementById('vol-bgm');
+  const sfxSlider    = document.getElementById('vol-sfx');
+  const muteBtn      = document.getElementById('vol-mute');
+
+  function pct(v) { return Math.round(v * 100) + '%'; }
+
+  masterSlider.addEventListener('input', () => {
+    Audio.setMaster(+masterSlider.value);
+    document.getElementById('vol-master-val').textContent = pct(masterSlider.value);
+  });
+  bgmSlider.addEventListener('input', () => {
+    Audio.setBGM(+bgmSlider.value);
+    document.getElementById('vol-bgm-val').textContent = pct(bgmSlider.value);
+  });
+  sfxSlider.addEventListener('input', () => {
+    Audio.setSFX(+sfxSlider.value);
+    document.getElementById('vol-sfx-val').textContent = pct(sfxSlider.value);
+  });
+
+  // 靜音切換
+  let muted = false, prevMaster = 0.8;
+  muteBtn.addEventListener('click', () => {
+    muted = !muted;
+    if (muted) {
+      prevMaster = Audio.getMaster();
+      Audio.setMaster(0);
+      masterSlider.value = 0;
+      document.getElementById('vol-master-val').textContent = '0%';
+      muteBtn.textContent = '恢復';
+      muteBtn.style.borderColor = 'var(--neon-r)';
+      muteBtn.style.color = 'var(--neon-r)';
+    } else {
+      Audio.setMaster(prevMaster);
+      masterSlider.value = prevMaster;
+      document.getElementById('vol-master-val').textContent = pct(prevMaster);
+      muteBtn.textContent = '靜音';
+      muteBtn.style.borderColor = 'rgba(0,229,160,0.25)';
+      muteBtn.style.color = 'var(--muted)';
+    }
+  });
+
+  Game.init();
+});
+</script>
+</body>
+</html>

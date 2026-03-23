@@ -6,7 +6,7 @@ from idioms_data import options_pool
 from dataBase import IdiomDBManager, Idiom
 
 # 在全域初始化 DB 連線，避免每次出題都重新啟動引擎
-db = IdiomDBManager('sqlite:///idiom_game.db')
+db = IdiomDBManager('sqlite:///CV2_idiom_web/idiom_game.db')
 
 def generate_multiple_choice():
     with db.Session() as session:

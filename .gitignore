@@ -1,0 +1,50 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# IDE-specific files and directories
+.idea/  # for PyCharm
+.vscode/ # for VS Code
+*.suo
+*.user
+*.ilk
+*.meta
+*.obj
+*.out
+*.rsp
+*.pdb
+[Dd]ebug/
+[Rr]elease/
+
+# Editor-specific files
+.swp
+.swo
+
+# Project distributions and packaging
+dist/
+build/
+*.egg-info/
+*.tar.gz
+*.whl
+
+# Tests and coverage
+.coverage
+.tox/
+htmlcov/
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite3
+
+# OS-specific files
+.DS_Store # macOS
+Thumbs.db # Windows
